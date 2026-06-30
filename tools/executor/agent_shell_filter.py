@@ -17,13 +17,19 @@ Usage (on server):
   /usr/local/bin/agent-shell-filter 123456 df -h
 """
 
+import json
 import os
 import re
-import sys
+import socket
 import subprocess
+import sys
+from datetime import datetime, timezone
 
 # Path to TOTP secret on the server (deployed once during setup)
 TOTP_SECRET_PATH = "/etc/agent/totp_secret"
+
+# Server-side audit log path
+AUDIT_LOG_PATH = "/var/log/agent-shell-filter.jsonl"
 
 # Commands that are NEVER allowed, even with valid TOTP.
 # This is defense-in-depth -- the agent side should also block these.
@@ -40,6 +46,55 @@ UNCONDITIONAL_BLOCKED: list[tuple[str, str]] = [
     (r"\bchmod\s+.*777\s+/", "chmod 777 on root paths is unconditionally blocked"),
     (r"\b:\(\)\s*\{", "Fork bomb pattern is unconditionally blocked"),
 ]
+
+# Patterns for commands considered read-only (auto-approved, no TOTP required)
+_READONLY_PATTERNS = [
+    r"^ls\b", r"^ll\b", r"^df\b", r"^du\b", r"^stat\b", r"^cat\b", r"^head\b", r"^tail\b",
+    r"^less\b", r"^zcat\b", r"^file\b", r"^find\b", r"^locate\b", r"^grep\b", r"^egrep\b",
+    r"^ps\b", r"^top\b", r"^htop\b", r"^uptime\b", r"^free\b", r"^vmstat\b", r"^iostat\b",
+    r"^dmesg\b", r"^lsof\b", r"^lsblk\b", r"^systemctl\s+status\b", r"^systemctl\s+list-\b",
+    r"^systemctl\s+is-\b", r"^systemctl\s+show\b", r"^systemctl\s+cat\b", r"^journalctl\b",
+    r"^who\b", r"^w\b", r"^whoami\b", r"^id\b", r"^last\b", r"^lastb\b", r"^getent\b",
+    r"^ss\b", r"^netstat\b", r"^ip\s+addr\b", r"^ip\s+link\b", r"^ip\s+route\b",
+    r"^hostname\b", r"^hostnamectl\b", r"^ping\b", r"^traceroute\b", r"^nslookup\b",
+    r"^dig\b", r"^curl\b", r"^wget\b", r"^uname\b", r"^lscpu\b", r"^lspci\b",
+    r"^timedatectl\b", r"^pgrep\b", r"^pidof\b", r"^dpkg\s+-[lL]\b", r"^rpm\s+-q",
+    r"^apt\s+list\b", r"^findmnt\b", r"^env\b", r"^printenv\b", r"^echo\b",
+    r"--help$", r"--version$", r"^man\b", r"^info\b", r"^whatis\b", r"^docker\s+ps\b",
+    r"^docker\s+images\b", r"^docker\s+logs\b", r"^docker\s+inspect\b",
+]
+
+
+def _ensure_audit_file() -> None:
+    """Create audit log with restrictive permissions if it doesn't exist."""
+    if not os.path.exists(AUDIT_LOG_PATH):
+        with open(AUDIT_LOG_PATH, "w") as f:
+            f.write("")
+        os.chmod(AUDIT_LOG_PATH, 0o600)
+
+
+def _write_audit_entry(
+    command: str,
+    category: str,
+    approved: bool,
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+) -> None:
+    """Append a JSON audit line to the server-side audit log."""
+    _ensure_audit_file()
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "target": socket.gethostname(),
+        "command": command,
+        "category": category,
+        "approved": approved,
+        "exit_code": exit_code,
+        "stdout": stdout[:8192] if stdout else "",
+        "stderr": stderr[:8192] if stderr else "",
+    }
+    with open(AUDIT_LOG_PATH, "a") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def SERVER_SIDE_BLOCKED(command: str) -> bool:
@@ -117,24 +172,8 @@ def main() -> None:
         print(f"REJECTED: command matches unconditionally blocked pattern", file=sys.stderr)
         sys.exit(1)
 
-    # Determine if this is a modifying command (standalone -- same patterns as agent-side whitelist)
-    import re as _re
-    _READONLY_PATTERNS = [
-        r"^ls\b", r"^ll\b", r"^df\b", r"^du\b", r"^stat\b", r"^cat\b", r"^head\b", r"^tail\b",
-        r"^less\b", r"^zcat\b", r"^file\b", r"^find\b", r"^locate\b", r"^grep\b", r"^egrep\b",
-        r"^ps\b", r"^top\b", r"^htop\b", r"^uptime\b", r"^free\b", r"^vmstat\b", r"^iostat\b",
-        r"^dmesg\b", r"^lsof\b", r"^lsblk\b", r"^systemctl\s+status\b", r"^systemctl\s+list-\b",
-        r"^systemctl\s+is-\b", r"^systemctl\s+show\b", r"^systemctl\s+cat\b", r"^journalctl\b",
-        r"^who\b", r"^w\b", r"^whoami\b", r"^id\b", r"^last\b", r"^lastb\b", r"^getent\b",
-        r"^ss\b", r"^netstat\b", r"^ip\s+addr\b", r"^ip\s+link\b", r"^ip\s+route\b",
-        r"^hostname\b", r"^hostnamectl\b", r"^ping\b", r"^traceroute\b", r"^nslookup\b",
-        r"^dig\b", r"^curl\b", r"^wget\b", r"^uname\b", r"^lscpu\b", r"^lspci\b",
-        r"^timedatectl\b", r"^pgrep\b", r"^pidof\b", r"^dpkg\s+-[lL]\b", r"^rpm\s+-q",
-        r"^apt\s+list\b", r"^mount\b", r"^findmnt\b", r"^env\b", r"^printenv\b", r"^echo\b",
-        r"--help$", r"--version$", r"^man\b", r"^info\b", r"^whatis\b", r"^docker\s+ps\b",
-        r"^docker\s+images\b", r"^docker\s+logs\b", r"^docker\s+inspect\b",
-    ]
-    is_ro = any(_re.search(p, command) for p in _READONLY_PATTERNS)
+    # Determine if this is a modifying command using module-level read-only patterns
+    is_ro = any(re.search(p, command) for p in _READONLY_PATTERNS)
 
     if not is_ro:
         # Modifying command -- TOTP required
@@ -151,6 +190,10 @@ def main() -> None:
             print("REJECTED: invalid or expired TOTP code", file=sys.stderr)
             sys.exit(1)
 
+    # Set category based on read-only classification
+    category = "readonly" if is_ro else "modifying"
+    approved = True
+
     # Execute
     try:
         result = subprocess.run(
@@ -163,11 +206,15 @@ def main() -> None:
         sys.stdout.write(result.stdout)
         if result.stderr:
             sys.stderr.write(result.stderr)
+        _write_audit_entry(command, category, approved, result.returncode,
+                           result.stdout, result.stderr)
         sys.exit(result.returncode)
     except subprocess.TimeoutExpired:
+        _write_audit_entry(command, category, approved, -1, "", "Command timed out")
         print("REJECTED: command timed out", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
+        _write_audit_entry(command, category, approved, -1, "", str(e))
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 

@@ -1,7 +1,6 @@
 import json
 import os
 import tempfile
-import pytest
 from tools.executor.audit import AuditLogger, get_audit_path
 
 

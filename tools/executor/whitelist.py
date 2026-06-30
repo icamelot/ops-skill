@@ -53,7 +53,7 @@ READONLY_PATTERNS: list[str] = [
     # Environment
     r"^env\b", r"^printenv\b", r"^echo\b",
     # Help / version
-    r"--help$", r"--version$", r"-h$",
+    r"--help$", r"--version$",
     r"^man\b", r"^info\b", r"^whatis\b",
     # Docker read-only
     r"^docker\s+ps\b", r"^docker\s+images\b",

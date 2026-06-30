@@ -4,7 +4,6 @@ This test file validates the filter logic, which would normally run
 on the target server as an SSH forced-command wrapper.
 """
 
-import pytest
 from unittest.mock import patch
 from tools.executor.agent_shell_filter import (
     validate_totp,

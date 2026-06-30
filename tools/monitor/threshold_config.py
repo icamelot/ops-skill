@@ -1,7 +1,6 @@
 """Threshold configuration loader."""
 
 import os
-from pathlib import Path
 import yaml
 
 
@@ -39,5 +38,8 @@ class ThresholdConfig:
         """Return merged thresholds for a server (server overrides merged onto defaults)."""
         merged = dict(self.defaults)
         server = self._data.get("servers", {}).get(server_id, {})
+        # Include jump_host from server config
+        if "jump_host" in server:
+            merged["jump_host"] = server["jump_host"]
         merged.update(server)
         return merged

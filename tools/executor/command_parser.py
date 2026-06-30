@@ -3,11 +3,6 @@
 import re
 
 
-class CommandSecurityError(Exception):
-    """Raised when a command contains a blocked shell pattern."""
-    pass
-
-
 # Patterns that are always blocked regardless of context
 BLOCKED_PATTERNS: list[tuple[str, str]] = [
     # Subshell execution
@@ -21,6 +16,10 @@ BLOCKED_PATTERNS: list[tuple[str, str]] = [
     (r">\s*/dev/(sd[a-z]+|nvme\d+n\d+|mmcblk\d+)", "Redirect to block device is blocked"),
     # Source /dev/tcp reverse shells (defense in depth)
     (r"/dev/tcp/", "/dev/tcp reverse shell pattern blocked"),
+    # ANSI-C quoting -- can encode arbitrary bytes
+    (r"\$\'", "ANSI-C quoting ($'...') is blocked"),
+    # Locale-aware quoting
+    (r'\$"', 'Locale-aware quoting ($"...") is blocked'),
 ]
 
 
@@ -57,6 +56,11 @@ def parse_command(command: str) -> list[str]:
 
         # Inside quotes, just accumulate
         if quote_char is not None:
+            # Handle escaped quote inside double quotes: \" is a literal quote
+            if quote_char == '"' and ch == '\\' and i + 1 < len(chars) and chars[i + 1] == '"':
+                current.append('"')
+                i += 2
+                continue
             current.append(ch)
             i += 1
             continue

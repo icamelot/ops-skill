@@ -37,6 +37,7 @@ class MonitorDaemon:
         self.ssh_key_path = ssh_key_path
         self.ssh_user = ssh_user
         self._sustained_cpu: dict[str, int] = {}  # server -> consecutive checks over threshold
+        self._last_alerts: dict[str, dict] = {}  # key -> {level, time} for dedup
 
     def run(self) -> None:
         """Main monitoring loop. Blocks forever."""
@@ -56,41 +57,51 @@ class MonitorDaemon:
         for server_id in self.config.get_servers():
             hostname = self.config.get_hostname(server_id)
             thresholds = self.config.get_thresholds(server_id)
+            jump_host = thresholds.get("jump_host")
 
             alerts: list[dict] = []
 
             # Disk check
-            disk_alert = self._check_disk(hostname, thresholds)
-            if disk_alert:
+            disk_alert = self._check_disk(hostname, thresholds, jump_host=jump_host)
+            if disk_alert and self._should_dispatch(server_id, disk_alert):
                 alerts.append(disk_alert)
 
             # Memory check
-            mem_alert = self._check_memory(hostname, thresholds)
-            if mem_alert:
+            mem_alert = self._check_memory(hostname, thresholds, jump_host=jump_host)
+            if mem_alert and self._should_dispatch(server_id, mem_alert):
                 alerts.append(mem_alert)
 
             # CPU check
-            cpu_alert = self._check_cpu(server_id, hostname, thresholds)
-            if cpu_alert:
+            cpu_alert = self._check_cpu(server_id, hostname, thresholds, jump_host=jump_host)
+            if cpu_alert and self._should_dispatch(server_id, cpu_alert):
                 alerts.append(cpu_alert)
 
             # Service checks
             for svc in self.config.services:
-                svc_alert = self._check_service(hostname, svc)
-                if svc_alert:
+                svc_alert = self._check_service(hostname, svc, jump_host=jump_host)
+                if svc_alert and self._should_dispatch(server_id, svc_alert):
                     alerts.append(svc_alert)
 
             if alerts:
                 self._dispatch_alert(server_id, hostname, alerts)
 
-    def _ssh(self, hostname: str, command: str) -> tuple[int, str, str]:
-        """Run a command via SSH and return (exit_code, stdout, stderr)."""
+    def _ssh(self, hostname: str, command: str,
+             jump_host: str | None = None) -> tuple[int, str, str]:
+        """Run a command via SSH and return (exit_code, stdout, stderr).
+
+        If jump_host is provided, adds -J user@jump_host to the SSH command.
+        """
         ssh_cmd = [
             "ssh",
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ConnectTimeout=10",
             "-o", "BatchMode=yes",
             "-i", self.ssh_key_path,
+        ]
+        if jump_host:
+            ssh_cmd.append("-J")
+            ssh_cmd.append(f"{self.ssh_user}@{jump_host}")
+        ssh_cmd += [
             f"{self.ssh_user}@{hostname}",
             command,
         ]
@@ -104,11 +115,13 @@ class MonitorDaemon:
         except Exception as e:
             return -1, "", str(e)
 
-    def _check_disk(self, hostname: str, thresholds: dict) -> dict | None:
+    def _check_disk(self, hostname: str, thresholds: dict,
+                    jump_host: str | None = None) -> dict | None:
         """Check disk usage. Returns alert dict if threshold exceeded."""
         code, stdout, stderr = self._ssh(
             hostname,
             "df -h --output=target,pcent,size,avail 2>/dev/null | tail -n +2",
+            jump_host=jump_host,
         )
         if code != 0:
             return {"type": "disk", "level": "error", "message": f"SSH failed: {stderr}"}
@@ -145,11 +158,13 @@ class MonitorDaemon:
                 }
         return None
 
-    def _check_memory(self, hostname: str, thresholds: dict) -> dict | None:
+    def _check_memory(self, hostname: str, thresholds: dict,
+                      jump_host: str | None = None) -> dict | None:
         """Check memory usage. Returns alert dict if threshold exceeded."""
         code, stdout, stderr = self._ssh(
             hostname,
-            "free -m | awk 'NR==2{print $2,$3,$4,$6}'",
+            "free -m | awk 'NR==2{print $2,$3,$7}'",
+            jump_host=jump_host,
         )
         if code != 0:
             return {"type": "memory", "level": "error", "message": f"SSH failed: {stderr}"}
@@ -160,10 +175,7 @@ class MonitorDaemon:
 
         total = int(parts[0])
         used = int(parts[1])
-        # available includes buffers/cache that can be reclaimed
-        available = total - used
-        if len(parts) >= 4:
-            available = int(parts[2]) + (int(parts[3]) if len(parts) >= 4 else 0)
+        available = int(parts[2])  # column $7 from free -m is the available MB
 
         used_pct = int((1 - available / total) * 100) if total > 0 else 0
 
@@ -172,6 +184,7 @@ class MonitorDaemon:
             code2, top_output, _ = self._ssh(
                 hostname,
                 "ps aux --sort=-%mem | head -6 | awk '{print $2,$11,$4\"%\"}'",
+                jump_host=jump_host,
             )
             return {
                 "type": "memory",
@@ -185,6 +198,7 @@ class MonitorDaemon:
             code2, top_output, _ = self._ssh(
                 hostname,
                 "ps aux --sort=-%mem | head -6 | awk '{print $2,$11,$4\"%\"}'",
+                jump_host=jump_host,
             )
             return {
                 "type": "memory",
@@ -196,11 +210,13 @@ class MonitorDaemon:
             }
         return None
 
-    def _check_cpu(self, server_id: str, hostname: str, thresholds: dict) -> dict | None:
+    def _check_cpu(self, server_id: str, hostname: str, thresholds: dict,
+                   jump_host: str | None = None) -> dict | None:
         """Check CPU load. Uses sustained check logic."""
         code, stdout, stderr = self._ssh(
             hostname,
             "top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | cut -d'%' -f1",
+            jump_host=jump_host,
         )
         if code != 0:
             return None  # CPU check is best-effort
@@ -227,6 +243,7 @@ class MonitorDaemon:
         code2, top_output, _ = self._ssh(
             hostname,
             "ps aux --sort=-%cpu | head -6 | awk '{print $2,$11,$3\"%\"}'",
+            jump_host=jump_host,
         )
 
         level = "critical" if cpu_pct >= crit_threshold else "warning"
@@ -239,16 +256,19 @@ class MonitorDaemon:
             "top_consumers": top_output.strip(),
         }
 
-    def _check_service(self, hostname: str, service: str) -> dict | None:
+    def _check_service(self, hostname: str, service: str,
+                       jump_host: str | None = None) -> dict | None:
         """Check if a systemd service is active. Returns alert if not."""
         code, stdout, stderr = self._ssh(
-            hostname, f"systemctl is-active {shlex.quote(service)}"
+            hostname, f"systemctl is-active {shlex.quote(service)}",
+            jump_host=jump_host,
         )
         if code != 0 or stdout.strip() != "active":
             # Pre-analysis: grab last 20 journal lines
             code2, journal, _ = self._ssh(
                 hostname,
                 f"journalctl -u {shlex.quote(service)} --no-pager -n 20 2>/dev/null",
+                jump_host=jump_host,
             )
             return {
                 "type": "service",
@@ -258,6 +278,37 @@ class MonitorDaemon:
                 "journal_last_20": journal.strip(),
             }
         return None
+
+    def _should_dispatch(self, server_id: str, alert: dict) -> bool:
+        """Check whether an alert should be dispatched (dedup logic).
+
+        Only dispatches if:
+        - The alert is new (not seen before)
+        - The severity level changed (warn -> crit or vice versa)
+        - At least 6 check intervals have passed since the last dispatch
+        """
+        key = f"{server_id}:{alert.get('type', 'unknown')}"
+        current_level = alert.get("level", "warning")
+        last = self._last_alerts.get(key)
+
+        if last is None:
+            # First time seeing this alert for this server/type
+            self._last_alerts[key] = {"level": current_level, "time": time.monotonic()}
+            return True
+
+        # Level changed — always dispatch
+        if last["level"] != current_level:
+            self._last_alerts[key] = {"level": current_level, "time": time.monotonic()}
+            return True
+
+        # Same level — check interval count
+        elapsed = time.monotonic() - last["time"]
+        intervals_passed = elapsed / self.config.check_interval
+        if intervals_passed >= 6:
+            self._last_alerts[key] = {"level": current_level, "time": time.monotonic()}
+            return True
+
+        return False
 
     def _dispatch_alert(self, server_id: str, hostname: str, alerts: list[dict]) -> None:
         """Dispatch alerts to the serveradmin agent via ask_agent_async."""

@@ -9,8 +9,7 @@ AUDIT_FILENAME = "command_audit.jsonl"
 
 
 def get_audit_path(log_dir: str) -> str:
-    """Return the full path to the audit log file."""
-    os.makedirs(log_dir, exist_ok=True)
+    """Return the full path to the audit log file (pure path computation)."""
     return os.path.join(log_dir, AUDIT_FILENAME)
 
 
@@ -27,11 +26,13 @@ class AuditLogger:
     """
 
     def __init__(self, log_dir: str):
+        os.makedirs(log_dir, exist_ok=True)
         self._log_path = get_audit_path(log_dir)
         self._ensure_file()
 
     def _ensure_file(self) -> None:
         """Create log file with restrictive permissions if it doesn't exist."""
+        os.makedirs(os.path.dirname(self._log_path), exist_ok=True)
         if not os.path.exists(self._log_path):
             with open(self._log_path, "w") as f:
                 f.write("")

@@ -1,4 +1,3 @@
-import pytest
 from tools.executor.rate_limiter import RateLimiter
 
 

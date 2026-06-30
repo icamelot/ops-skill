@@ -19,6 +19,7 @@ servers:
 
   server-b:
     hostname: server-b.local
+    jump_host: bastion.example.com  # compute nodes N1-N5 accessed via this jump host
     # Login node — may have different thresholds
 
 # Service names to check via systemctl is-active

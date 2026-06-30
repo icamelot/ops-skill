@@ -26,8 +26,8 @@ class CommandExecutor:
     Pipeline:
       1. Parse & validate (command_parser)
       2. Classify (whitelist)
-      3. Rate-check (rate_limiter) if modifying
-      4. TOTP check if modifying
+      3. TOTP check if modifying
+      4. Rate-check (rate_limiter) if modifying
       5. SSH execute
       6. Audit log
     """
@@ -38,9 +38,11 @@ class CommandExecutor:
         ssh_user: str = "agent",
         max_modifying_per_hour: int = 10,
         audit_dir: str = "/ductor/agents/serveradmin/workspace/logs",
+        jump_host: str | None = None,
     ):
         self.ssh_key_path = ssh_key_path
         self.ssh_user = ssh_user
+        self.jump_host = jump_host
         self.rate_limiter = RateLimiter(max_per_hour=max_modifying_per_hour)
         self.audit = AuditLogger(audit_dir)
 
@@ -49,6 +51,7 @@ class CommandExecutor:
         target: str,
         command: str,
         totp_code: str | None = None,
+        jump_host: str | None = None,
     ) -> dict:
         """Execute a command on a remote target through the security pipeline.
 
@@ -56,11 +59,15 @@ class CommandExecutor:
             target: Server hostname or IP.
             command: The shell command string to execute.
             totp_code: 6-digit TOTP code (required for modifying commands).
+            jump_host: Optional jump/bastion host (overrides instance-level setting).
 
         Returns:
             Dict with keys: exit_code, stdout, stderr, approved, needs_approval,
             blocked, target, command.
         """
+        # Resolve jump_host: per-invocation overrides instance-level
+        effective_jump_host = jump_host if jump_host is not None else self.jump_host
+
         # Layer 1: Parse and validate
         parsed = parse_command(command)
         is_safe, reason = validate_commands(parsed)
@@ -120,7 +127,8 @@ class CommandExecutor:
                 return vars(result)
 
         # All checks passed — execute via SSH
-        return self._ssh_execute(target, command, overall_category, True)
+        return self._ssh_execute(target, command, overall_category, True,
+                                 jump_host=effective_jump_host)
 
     def _verify_totp(self, target: str, code: str) -> bool:
         """Verify a TOTP code for the given target.
@@ -138,7 +146,8 @@ class CommandExecutor:
         return True  # actual TOTP validation happens on the server side
 
     def _ssh_execute(
-        self, target: str, command: str, category: str, approved: bool
+        self, target: str, command: str, category: str, approved: bool,
+        jump_host: str | None = None,
     ) -> dict:
         """Execute a command via SSH and return the result."""
         ssh_cmd = [
@@ -147,6 +156,11 @@ class CommandExecutor:
             "-o", "ConnectTimeout=10",
             "-o", "BatchMode=yes",
             "-i", self.ssh_key_path,
+        ]
+        if jump_host:
+            ssh_cmd.append("-J")
+            ssh_cmd.append(f"{self.ssh_user}@{jump_host}")
+        ssh_cmd += [
             f"{self.ssh_user}@{target}",
             command,
         ]
