@@ -1,10 +1,9 @@
 """Command executor — unified SSH command execution through the security pipeline."""
 
 import subprocess
-import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from tools.executor.command_parser import parse_command, validate_commands
-from tools.executor.whitelist import classify_command, is_readonly
+from tools.executor.whitelist import classify_command
 from tools.executor.rate_limiter import RateLimiter
 from tools.executor.audit import AuditLogger
 
@@ -44,9 +43,6 @@ class CommandExecutor:
         self.ssh_user = ssh_user
         self.rate_limiter = RateLimiter(max_per_hour=max_modifying_per_hour)
         self.audit = AuditLogger(audit_dir)
-        # Mapping of target -> TOTP secret (populated via config, NOT code)
-        # The agent does NOT generate TOTP codes — it only passes them through.
-        self.totp_secrets: dict[str, str] = {}
 
     def execute(
         self,
@@ -90,22 +86,9 @@ class CommandExecutor:
 
         # If any sub-command is modifying, the whole chain requires approval
         if needs_approval:
-            # Layer 3: Rate limit check
-            if not self.rate_limiter.check_and_increment():
-                result = ExecutionResult(
-                    exit_code=-1,
-                    stdout="",
-                    stderr="BLOCKED: modifying command rate limit exceeded. "
-                           f"{self.rate_limiter.get_remaining()} remaining this hour.",
-                    approved=False,
-                    needs_approval=True,
-                    target=target,
-                    command=command,
-                )
-                self.audit.log_entry(target, command, overall_category, False, vars(result))
-                return vars(result)
-
-            # Layer 4: TOTP check
+            # Layer 3: TOTP check (before rate limiter — a failed TOTP must not
+            # consume a rate slot, per the global constraint that the agent never
+            # stores TOTP secrets; validation is server-side-only.)
             if not totp_code or not self._verify_totp(target, totp_code):
                 result = ExecutionResult(
                     exit_code=-1,
@@ -120,16 +103,34 @@ class CommandExecutor:
                 self.audit.log_entry(target, command, overall_category, False, vars(result))
                 return vars(result)
 
+            # Layer 4: Rate limit check (only after TOTP passes,
+            # so a failed attempt never wastes a rate slot)
+            if not self.rate_limiter.check_and_increment():
+                result = ExecutionResult(
+                    exit_code=-1,
+                    stdout="",
+                    stderr="BLOCKED: modifying command rate limit exceeded. "
+                           f"{self.rate_limiter.get_remaining()} remaining this hour.",
+                    approved=False,
+                    needs_approval=True,
+                    target=target,
+                    command=command,
+                )
+                self.audit.log_entry(target, command, overall_category, False, vars(result))
+                return vars(result)
+
         # All checks passed — execute via SSH
         return self._ssh_execute(target, command, overall_category, True)
 
     def _verify_totp(self, target: str, code: str) -> bool:
         """Verify a TOTP code for the given target.
 
-        The agent only calls verify — it never generates codes.
-        The secret is looked up from config and passed to the server-side
-        agent-shell-filter for validation. Client-side pre-check here is a
-        basic format validation only.
+        DESIGN CONSTRAINT — The agent NEVER stores or generates TOTP secrets.
+        The secret lives only in host config and is validated server-side by
+        agent-shell-filter. This client-side method performs format validation
+        only (6 digits), then trusts the server for the real check. This is
+        intentional: keeping secrets off the agent filesystem is a hard security
+        requirement.
         """
         # Basic format: 6 digits
         if not code or not code.isdigit() or len(code) != 6:

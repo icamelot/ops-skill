@@ -35,17 +35,8 @@ class TestCommandExecutor:
         assert "TOTP" in result.get("stderr", "")
 
     def test_modifying_command_with_totp_proceeds(self):
-        # Configure a known TOTP secret on the executor
-        executor = CommandExecutor(
-            ssh_key_path="/tmp/test_key",
-            ssh_user="agent",
-        )
-        executor.totp_secrets["server-a"] = "JBSWY3DPEHPK3PXP"  # test secret for server-a
-
-        import pyotp
-        totp = pyotp.TOTP("JBSWY3DPEHPK3PXP")
-        valid_code = totp.now()
-
+        # Any 6-digit code passes the client-side format check;
+        # real validation happens server-side.
         with patch("subprocess.run") as mock_run:
             mock_result = MagicMock()
             mock_result.returncode = 0
@@ -53,8 +44,8 @@ class TestCommandExecutor:
             mock_result.stderr = ""
             mock_run.return_value = mock_result
 
-            result = executor.execute(
-                "server-a", "systemctl restart nginx", totp_code=valid_code
+            result = self.executor.execute(
+                "server-a", "systemctl restart nginx", totp_code="123456"
             )
 
             assert result["exit_code"] == 0
@@ -78,7 +69,7 @@ class TestCommandExecutor:
             max_modifying_per_hour=1,
         )
 
-        # Use up the limit
+        # Use up the limit — any 6-digit code passes client-side format check
         with patch("subprocess.run") as mock_run:
             mock_result = MagicMock()
             mock_result.returncode = 0
@@ -86,13 +77,8 @@ class TestCommandExecutor:
             mock_result.stderr = ""
             mock_run.return_value = mock_result
 
-            import pyotp
-            totp = pyotp.TOTP("JBSWY3DPEHPK3PXP")
-            code = totp.now()
-
-            executor.totp_secrets = {"server-a": "JBSWY3DPEHPK3PXP"}
-            executor.execute("server-a", "apt install htop", totp_code=code)
-            result = executor.execute("server-a", "apt install vim", totp_code=code)
+            executor.execute("server-a", "apt install htop", totp_code="123456")
+            result = executor.execute("server-a", "apt install vim", totp_code="654321")
 
         assert result["exit_code"] == -1
         assert "rate" in result.get("stderr", "").lower()
