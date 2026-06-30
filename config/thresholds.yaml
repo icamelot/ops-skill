@@ -1,0 +1,28 @@
+# Threshold configuration for monitoring daemon
+# Levels: warn (agent analyzes), crit (immediate alert + agent analysis)
+
+defaults:
+  disk_warn_pct: 85
+  disk_crit_pct: 95
+  mem_warn_pct: 80
+  mem_crit_pct: 95
+  cpu_warn_pct: 70
+  cpu_crit_pct: 90
+  cpu_sustained_checks: 3  # number of consecutive checks before alerting
+
+check_interval_seconds: 300  # 5 minutes between checks
+
+servers:
+  server-a:
+    hostname: server-a.local  # override with actual hostname/IP in deployment
+    # Uses defaults unless overridden
+
+  server-b:
+    hostname: server-b.local
+    # Login node — may have different thresholds
+
+# Service names to check via systemctl is-active
+services:
+  - sshd
+  - nginx
+  - docker
